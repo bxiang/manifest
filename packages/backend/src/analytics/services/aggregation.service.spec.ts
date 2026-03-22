@@ -6,6 +6,7 @@ import { AggregationService } from './aggregation.service';
 import { AgentMessage } from '../../entities/agent-message.entity';
 import { Agent } from '../../entities/agent.entity';
 import { TenantCacheService } from '../../common/services/tenant-cache.service';
+import { DatabaseSaveService } from '../../database/database-save.service';
 
 describe('AggregationService', () => {
   let service: AggregationService;
@@ -99,6 +100,10 @@ describe('AggregationService', () => {
         {
           provide: TenantCacheService,
           useValue: { resolve: jest.fn().mockResolvedValue('tenant-123') },
+        },
+        {
+          provide: DatabaseSaveService,
+          useValue: { save: jest.fn().mockResolvedValue(undefined) },
         },
       ],
     }).compile();
@@ -505,6 +510,10 @@ describe('AggregationService (sql.js / local mode)', () => {
         },
         { provide: DataSource, useValue: { options: { type: 'sqljs' } } },
         { provide: TenantCacheService, useValue: { resolve: jest.fn().mockResolvedValue(null) } },
+        {
+          provide: DatabaseSaveService,
+          useValue: { save: jest.fn().mockResolvedValue(undefined) },
+        },
       ],
     }).compile();
 
@@ -513,6 +522,79 @@ describe('AggregationService (sql.js / local mode)', () => {
 
   it('detects sqlite dialect from sqljs datasource', () => {
     expect(service).toBeDefined();
+  });
+
+  it('uses sequential updates when renaming on sqlite', async () => {
+    const mockAgentGetOne = jest
+      .fn()
+      .mockResolvedValueOnce({ id: 'a1', name: 'old' })
+      .mockResolvedValueOnce(null);
+
+    const mockExecute = jest.fn().mockResolvedValue({});
+    const mockManagerQb = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      execute: mockExecute,
+    };
+    const mockSqljsTransaction = jest
+      .fn()
+      .mockImplementation(async (cb: (...args: unknown[]) => unknown) => {
+        const manager = { createQueryBuilder: jest.fn().mockReturnValue(mockManagerQb) };
+        return cb(manager);
+      });
+    const mockDbSave = jest.fn().mockResolvedValue(undefined);
+
+    const sqljsModule: TestingModule = await Test.createTestingModule({
+      providers: [
+        AggregationService,
+        {
+          provide: getRepositoryToken(AgentMessage),
+          useValue: {
+            createQueryBuilder: jest.fn().mockReturnValue({
+              select: jest.fn().mockReturnThis(),
+              addSelect: jest.fn().mockReturnThis(),
+              where: jest.fn().mockReturnThis(),
+              andWhere: jest.fn().mockReturnThis(),
+              orWhere: jest.fn().mockReturnThis(),
+              groupBy: jest.fn().mockReturnThis(),
+              orderBy: jest.fn().mockReturnThis(),
+              limit: jest.fn().mockReturnThis(),
+              getRawOne: jest.fn().mockResolvedValue(null),
+            }),
+          },
+        },
+        {
+          provide: getRepositoryToken(Agent),
+          useValue: {
+            createQueryBuilder: jest.fn().mockReturnValue({
+              select: jest.fn().mockReturnThis(),
+              leftJoin: jest.fn().mockReturnThis(),
+              where: jest.fn().mockReturnThis(),
+              andWhere: jest.fn().mockReturnThis(),
+              orderBy: jest.fn().mockReturnThis(),
+              getOne: mockAgentGetOne,
+              getMany: jest.fn().mockResolvedValue([]),
+            }),
+            delete: jest.fn().mockResolvedValue({}),
+          },
+        },
+        {
+          provide: DataSource,
+          useValue: { options: { type: 'sqljs' }, transaction: mockSqljsTransaction },
+        },
+        { provide: TenantCacheService, useValue: { resolve: jest.fn().mockResolvedValue(null) } },
+        { provide: DatabaseSaveService, useValue: { save: mockDbSave } },
+      ],
+    }).compile();
+
+    const sqljsService = sqljsModule.get<AggregationService>(AggregationService);
+    await sqljsService.renameAgent('u1', 'old', 'new-name');
+
+    expect(mockSqljsTransaction).toHaveBeenCalledTimes(1);
+    // 1 agent update + 5 table updates = 6
+    expect(mockExecute).toHaveBeenCalledTimes(6);
+    expect(mockDbSave).toHaveBeenCalledTimes(1);
   });
 
   it('business logic works identically on sqlite dialect', async () => {

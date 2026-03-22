@@ -28,6 +28,7 @@ import { ProxyMessageRecorder } from './proxy/proxy-message-recorder';
 import { SessionMomentumService } from './proxy/session-momentum.service';
 import { OllamaSyncService } from '../database/ollama-sync.service';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { DatabaseModule } from '../database/database.module';
 import { OpenaiOauthService } from './openai-oauth.service';
 import { OpenaiOauthController } from './openai-oauth.controller';
 import { MinimaxOauthService } from './minimax-oauth.service';
@@ -47,6 +48,7 @@ import { MinimaxOauthController } from './minimax-oauth.controller';
     ModelPricesModule,
     ModelDiscoveryModule,
     NotificationsModule,
+    DatabaseModule,
   ],
   controllers: [
     RoutingController,

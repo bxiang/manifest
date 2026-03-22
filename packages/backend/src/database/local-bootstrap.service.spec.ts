@@ -36,6 +36,7 @@ jest.mock('../routing/model-discovery/model-discovery.service', () => ({
 }));
 
 import { LocalBootstrapService } from './local-bootstrap.service';
+import { DatabaseSaveService } from './database-save.service';
 import { existsSync, readFileSync } from 'fs';
 
 function makeMockRepo() {
@@ -60,6 +61,7 @@ describe('LocalBootstrapService', () => {
   let mockRecalculate: jest.Mock;
   let mockDiscoverAllForAgent: jest.Mock;
   let mockModuleRef: { get: jest.Mock };
+  let mockDbSave: { save: jest.Mock };
 
   beforeEach(() => {
     mockTenantRepo = makeMockRepo();
@@ -68,6 +70,7 @@ describe('LocalBootstrapService', () => {
     mockMessageRepo = makeMockRepo();
     mockProviderRepo = makeMockRepo();
     mockTierRepo = makeMockRepo();
+    mockDbSave = { save: jest.fn().mockResolvedValue(undefined) };
     mockRecalculate = jest.fn().mockResolvedValue(undefined);
     mockDiscoverAllForAgent = jest.fn().mockResolvedValue(undefined);
     mockModuleRef = {
@@ -91,6 +94,7 @@ describe('LocalBootstrapService', () => {
       mockProviderRepo as never,
       mockTierRepo as never,
       mockModuleRef as never,
+      mockDbSave as never,
     );
   });
 

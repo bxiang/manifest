@@ -12,6 +12,7 @@ import {
   computeCutoff,
   sqlSanitizeCost,
 } from '../../common/utils/sql-dialect';
+import { DatabaseSaveService } from '../../database/database-save.service';
 
 export { MetricWithTrend };
 
@@ -26,6 +27,7 @@ export class AggregationService {
     private readonly agentRepo: Repository<Agent>,
     private readonly dataSource: DataSource,
     private readonly tenantCache: TenantCacheService,
+    private readonly dbSave: DatabaseSaveService,
   ) {
     this.dialect = detectDialect(this.dataSource.options.type as string);
   }
@@ -303,16 +305,28 @@ export class AggregationService {
         'token_usage_snapshots',
         'cost_snapshots',
       ];
-      await Promise.all(
-        tables.map((table) =>
-          manager
+      if (this.dialect === 'sqlite') {
+        for (const table of tables) {
+          await manager
             .createQueryBuilder()
             .update(table)
             .set({ agent_name: newName })
             .where('agent_name = :currentName', { currentName })
-            .execute(),
-        ),
-      );
+            .execute();
+        }
+      } else {
+        await Promise.all(
+          tables.map((table) =>
+            manager
+              .createQueryBuilder()
+              .update(table)
+              .set({ agent_name: newName })
+              .where('agent_name = :currentName', { currentName })
+              .execute(),
+          ),
+        );
+      }
     });
+    await this.dbSave.save();
   }
 }

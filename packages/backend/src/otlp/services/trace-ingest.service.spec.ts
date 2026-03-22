@@ -6,6 +6,7 @@ import { LlmCall } from '../../entities/llm-call.entity';
 import { ToolExecution } from '../../entities/tool-execution.entity';
 import { ModelPricingCacheService } from '../../model-prices/model-pricing-cache.service';
 import { UserProvider } from '../../entities/user-provider.entity';
+import { DatabaseSaveService } from '../../database/database-save.service';
 import { IngestionContext } from '../interfaces/ingestion-context.interface';
 
 const testCtx: IngestionContext = {
@@ -25,6 +26,7 @@ describe('TraceIngestService', () => {
   let mockPricingGetByModel: jest.Mock;
   let mockProviderFind: jest.Mock;
   let mockExecute: jest.Mock;
+  let mockDbSave: jest.Mock;
   let mockTurnManager: {
     transaction: jest.Mock;
     getRepository: jest.Mock;
@@ -41,6 +43,7 @@ describe('TraceIngestService', () => {
     mockPricingGetByModel = jest.fn().mockReturnValue(undefined);
     mockProviderFind = jest.fn().mockResolvedValue([]);
     mockExecute = jest.fn().mockResolvedValue({});
+    mockDbSave = jest.fn().mockResolvedValue(undefined);
 
     const mockQb = {
       update: jest.fn().mockReturnThis(),
@@ -54,7 +57,10 @@ describe('TraceIngestService', () => {
       findOne: mockTurnFindOne,
       find: mockTurnFind,
       createQueryBuilder: jest.fn().mockReturnValue(mockQb),
-      manager: undefined as unknown as { transaction: jest.Mock },
+      manager: undefined as unknown as {
+        transaction: jest.Mock;
+        connection: { options: { type: string } };
+      },
     };
     const mockLlmRepo = { insert: mockLlmInsert };
     const mockToolRepo = { insert: mockToolInsert };
@@ -71,7 +77,10 @@ describe('TraceIngestService', () => {
       query: jest.fn().mockResolvedValue([]),
       connection: { options: { type: 'sqlite' } },
     };
-    mockTurnRepo.manager = { transaction: mockTurnManager.transaction };
+    mockTurnRepo.manager = {
+      transaction: mockTurnManager.transaction,
+      connection: mockTurnManager.connection,
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -84,6 +93,7 @@ describe('TraceIngestService', () => {
         { provide: getRepositoryToken(ToolExecution), useValue: mockToolRepo },
         { provide: getRepositoryToken(UserProvider), useValue: { find: mockProviderFind } },
         { provide: ModelPricingCacheService, useValue: { getByModel: mockPricingGetByModel } },
+        { provide: DatabaseSaveService, useValue: { save: mockDbSave } },
       ],
     }).compile();
 
@@ -169,6 +179,43 @@ describe('TraceIngestService', () => {
       'SELECT id FROM agents WHERE id = $1 FOR UPDATE',
       ['test-agent'],
     );
+  });
+
+  it('serializes concurrent sqlite writes via in-memory lock', async () => {
+    const order: string[] = [];
+    mockTurnManager.transaction.mockImplementation(
+      async (cb: (manager: unknown) => Promise<unknown>) => {
+        order.push('txn-start');
+        await new Promise((r) => setTimeout(r, 20));
+        const result = await cb(mockTurnManager);
+        order.push('txn-end');
+        return result;
+      },
+    );
+
+    const request = {
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [
+              { key: 'service.name', value: { stringValue: 'agent' } },
+              { key: 'agent.name', value: { stringValue: 'bot-1' } },
+            ],
+          },
+          scopeSpans: [
+            {
+              scope: { name: 'test' },
+              spans: [makeSpan({ name: 'openclaw.agent.turn' })],
+            },
+          ],
+        },
+      ],
+    };
+
+    await Promise.all([service.ingest(request, testCtx), service.ingest(request, testCtx)]);
+
+    // With serialization: start-end-start-end (never start-start)
+    expect(order).toEqual(['txn-start', 'txn-end', 'txn-start', 'txn-end']);
   });
 
   it('ingests an llm_call span (has gen_ai.system attribute)', async () => {
@@ -406,6 +453,39 @@ describe('TraceIngestService', () => {
 
     // Verify setParameter was called with 'reason'
     expect(mockQb.setParameter).toHaveBeenCalledWith('reason', 'scored');
+  });
+
+  it('uses parallel rollup updates on postgres connections', async () => {
+    mockTurnManager.connection.options.type = 'postgres';
+
+    const parentSpan = makeSpan({
+      spanId: 'span-msg-pg',
+      name: 'openclaw.agent.turn',
+      attributes: [],
+    });
+
+    const llmSpan = makeSpan({
+      spanId: 'span-llm-pg',
+      parentSpanId: 'span-msg-pg',
+      attributes: [
+        { key: 'gen_ai.system', value: { stringValue: 'openai' } },
+        { key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } },
+        { key: 'gen_ai.usage.input_tokens', value: { intValue: 50 } },
+        { key: 'gen_ai.usage.output_tokens', value: { intValue: 10 } },
+      ],
+    });
+
+    const request = {
+      resourceSpans: [
+        {
+          resource: { attributes: [] },
+          scopeSpans: [{ scope: { name: 'test' }, spans: [parentSpan, llmSpan] }],
+        },
+      ],
+    };
+
+    await service.ingest(request, testCtx);
+    expect(mockExecute).toHaveBeenCalled();
   });
 
   it('sets cost to zero in rollup when model provider is subscription-only', async () => {

@@ -20,6 +20,7 @@ import {
   LOCAL_AGENT_NAME,
 } from '../common/constants/local-mode.constants';
 import { seedAgentMessages } from './seed-messages';
+import { DatabaseSaveService } from './database-save.service';
 
 @Injectable()
 export class LocalBootstrapService implements OnModuleInit {
@@ -33,6 +34,7 @@ export class LocalBootstrapService implements OnModuleInit {
     @InjectRepository(UserProvider) private readonly providerRepo: Repository<UserProvider>,
     @InjectRepository(TierAssignment) private readonly tierRepo: Repository<TierAssignment>,
     private readonly moduleRef: ModuleRef,
+    private readonly dbSave: DatabaseSaveService,
   ) {}
 
   async onModuleInit() {
@@ -44,6 +46,7 @@ export class LocalBootstrapService implements OnModuleInit {
       agentId: LOCAL_AGENT_ID,
       agentName: LOCAL_AGENT_NAME,
     });
+    await this.dbSave.save();
     this.logger.log('Local mode bootstrap complete');
 
     // Discover models for all active providers in the background

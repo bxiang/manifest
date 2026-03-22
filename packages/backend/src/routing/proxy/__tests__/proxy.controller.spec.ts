@@ -1,6 +1,7 @@
 import { HttpException } from '@nestjs/common';
 import { ProxyController } from '../proxy.controller';
 import { ProxyMessageRecorder } from '../proxy-message-recorder';
+import { DatabaseSaveService } from '../../../database/database-save.service';
 
 function mockResponse(): {
   res: Record<string, jest.Mock | boolean | number>;
@@ -82,7 +83,7 @@ describe('ProxyController', () => {
     findOne: jest.Mock;
     find: jest.Mock;
     update: jest.Mock;
-    manager: { transaction: jest.Mock };
+    manager: { transaction: jest.Mock; connection: { options: { type: string } } };
   };
   let mockPricingCache: { getByModel: jest.Mock };
   let recorder: ProxyMessageRecorder;
@@ -115,11 +116,21 @@ describe('ProxyController', () => {
       findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
       update: jest.fn().mockResolvedValue({}),
-      manager: { transaction: mockMessageManager.transaction },
+      manager: {
+        transaction: mockMessageManager.transaction,
+        connection: mockMessageManager.connection,
+      },
     };
     mockMessageManager.getRepository.mockReturnValue(mockMessageRepo);
     mockPricingCache = { getByModel: jest.fn().mockReturnValue(undefined) };
-    recorder = new ProxyMessageRecorder(mockMessageRepo as never, mockPricingCache as never);
+    const mockDbSave: Partial<DatabaseSaveService> = {
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    recorder = new ProxyMessageRecorder(
+      mockMessageRepo as never,
+      mockPricingCache as never,
+      mockDbSave as never,
+    );
     controller = new ProxyController(
       proxyService as never,
       rateLimiter as never,
@@ -1982,9 +1993,13 @@ describe('ProxyController', () => {
       jest.useFakeTimers();
       recorder.onModuleDestroy(); // stop timer from beforeEach recorder
 
+      const timedDbSave: Partial<DatabaseSaveService> = {
+        save: jest.fn().mockResolvedValue(undefined),
+      };
       const timedRecorder = new ProxyMessageRecorder(
         mockMessageRepo as never,
         mockPricingCache as never,
+        timedDbSave as never,
       );
 
       const cooldownMap = (timedRecorder as any).rateLimitCooldown as Map<string, number>;
@@ -2001,9 +2016,13 @@ describe('ProxyController', () => {
       jest.useFakeTimers();
       recorder.onModuleDestroy(); // stop timer from beforeEach recorder
 
+      const timedDbSave: Partial<DatabaseSaveService> = {
+        save: jest.fn().mockResolvedValue(undefined),
+      };
       const timedRecorder = new ProxyMessageRecorder(
         mockMessageRepo as never,
         mockPricingCache as never,
+        timedDbSave as never,
       );
 
       timedRecorder.onModuleDestroy();

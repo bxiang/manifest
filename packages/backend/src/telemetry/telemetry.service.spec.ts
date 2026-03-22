@@ -7,6 +7,7 @@ import { TelemetryEventDto } from './dto/create-telemetry.dto';
 import { IngestEventBusService } from '../common/services/ingest-event-bus.service';
 import { TenantCacheService } from '../common/services/tenant-cache.service';
 import { ModelPricingCacheService } from '../model-prices/model-pricing-cache.service';
+import { DatabaseSaveService } from '../database/database-save.service';
 
 function makeEvent(overrides: Partial<TelemetryEventDto> = {}): TelemetryEventDto {
   const dto = new TelemetryEventDto();
@@ -34,11 +35,21 @@ describe('TelemetryService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TelemetryService,
-        { provide: getRepositoryToken(AgentMessage), useValue: { insert: mockTurnInsert } },
+        {
+          provide: getRepositoryToken(AgentMessage),
+          useValue: {
+            insert: mockTurnInsert,
+            manager: { connection: { options: { type: 'postgres' } } },
+          },
+        },
         { provide: getRepositoryToken(SecurityEvent), useValue: { insert: mockSecurityInsert } },
         { provide: IngestEventBusService, useValue: { emit: jest.fn() } },
         { provide: TenantCacheService, useValue: { resolve: mockTenantResolve } },
         { provide: ModelPricingCacheService, useValue: { getByModel: mockPricingGetByModel } },
+        {
+          provide: DatabaseSaveService,
+          useValue: { save: jest.fn().mockResolvedValue(undefined) },
+        },
       ],
     }).compile();
 
@@ -168,5 +179,40 @@ describe('TelemetryService', () => {
         cost_usd: expect.closeTo(0.0525, 4),
       }),
     ]);
+  });
+
+  it('uses sequential inserts for sqljs connections', async () => {
+    const seqTurnInsert = jest.fn().mockResolvedValue({});
+    const seqSecurityInsert = jest.fn().mockResolvedValue({});
+    const seqDbSave = jest.fn().mockResolvedValue(undefined);
+    const seqModule: TestingModule = await Test.createTestingModule({
+      providers: [
+        TelemetryService,
+        {
+          provide: getRepositoryToken(AgentMessage),
+          useValue: {
+            insert: seqTurnInsert,
+            manager: { connection: { options: { type: 'sqljs' } } },
+          },
+        },
+        { provide: getRepositoryToken(SecurityEvent), useValue: { insert: seqSecurityInsert } },
+        { provide: IngestEventBusService, useValue: { emit: jest.fn() } },
+        { provide: TenantCacheService, useValue: { resolve: jest.fn().mockResolvedValue('t') } },
+        { provide: ModelPricingCacheService, useValue: { getByModel: jest.fn() } },
+        { provide: DatabaseSaveService, useValue: { save: seqDbSave } },
+      ],
+    }).compile();
+
+    const seqService = seqModule.get<TelemetryService>(TelemetryService);
+    const event = makeEvent({
+      input_tokens: 10,
+      security_event: { severity: 'low', category: 'test', description: 'd' },
+    });
+
+    const result = await seqService.ingest([event], 'u');
+    expect(result.accepted).toBe(1);
+    expect(seqTurnInsert).toHaveBeenCalledTimes(1);
+    expect(seqSecurityInsert).toHaveBeenCalledTimes(1);
+    expect(seqDbSave).toHaveBeenCalledTimes(1);
   });
 });

@@ -9,7 +9,7 @@ function createDataSource(): DataSource {
     return new DataSource({
       type: 'sqljs',
       location: dbPath === ':memory:' ? undefined : dbPath,
-      autoSave: dbPath !== ':memory:',
+      autoSave: false,
       entities: ['src/entities/!(*.spec).ts'],
       synchronize: true,
     });

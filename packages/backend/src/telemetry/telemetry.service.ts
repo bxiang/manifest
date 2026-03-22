@@ -8,6 +8,7 @@ import { TelemetryEventDto } from './dto/create-telemetry.dto';
 import { IngestEventBusService } from '../common/services/ingest-event-bus.service';
 import { TenantCacheService } from '../common/services/tenant-cache.service';
 import { ModelPricingCacheService } from '../model-prices/model-pricing-cache.service';
+import { DatabaseSaveService } from '../database/database-save.service';
 
 export interface IngestResult {
   accepted: number;
@@ -27,6 +28,7 @@ export class TelemetryService {
     private readonly eventBus: IngestEventBusService,
     private readonly tenantCache: TenantCacheService,
     private readonly pricingCache: ModelPricingCacheService,
+    private readonly dbSave: DatabaseSaveService,
   ) {}
 
   private static readonly MAX_EVENTS_PER_BATCH = 1000;
@@ -57,10 +59,17 @@ export class TelemetryService {
     let rejected = errors.length;
 
     try {
-      const inserts: Promise<unknown>[] = [];
-      if (messageRows.length > 0) inserts.push(this.turnRepo.insert(messageRows));
-      if (securityRows.length > 0) inserts.push(this.securityRepo.insert(securityRows));
-      await Promise.all(inserts);
+      const isSqljs = this.turnRepo.manager.connection.options.type !== 'postgres';
+      if (isSqljs) {
+        if (messageRows.length > 0) await this.turnRepo.insert(messageRows);
+        if (securityRows.length > 0) await this.securityRepo.insert(securityRows);
+      } else {
+        const inserts: Promise<unknown>[] = [];
+        if (messageRows.length > 0) inserts.push(this.turnRepo.insert(messageRows));
+        if (securityRows.length > 0) inserts.push(this.securityRepo.insert(securityRows));
+        await Promise.all(inserts);
+      }
+      await this.dbSave.save();
     } catch (err) {
       const reason = err instanceof Error ? err.message : 'Insert failed';
       this.logger.warn(`Batch insert failed: ${reason}`);

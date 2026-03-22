@@ -4,6 +4,7 @@ import { EntityManager, Repository } from 'typeorm';
 import { v4 as uuid } from 'uuid';
 import { AgentMessage } from '../../entities/agent-message.entity';
 import { ModelPricingCacheService } from '../../model-prices/model-pricing-cache.service';
+import { DatabaseSaveService } from '../../database/database-save.service';
 import { IngestionContext } from '../../otlp/interfaces/ingestion-context.interface';
 import { FailedFallback } from './proxy.service';
 import { StreamUsage } from './stream-writer';
@@ -16,6 +17,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
   private readonly MAX_COOLDOWN_ENTRIES = 1_000;
   private readonly cooldownCleanupTimer: ReturnType<typeof setInterval>;
   private readonly successWriteLocks = new Map<string, Promise<void>>();
+  private readonly sqliteLocks = new Map<string, Promise<void>>();
   private readonly SUCCESS_SESSION_DEDUP_WINDOW_MS = 30_000;
   private readonly SUCCESS_END_TIME_GRACE_MS = 5_000;
 
@@ -23,6 +25,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
     @InjectRepository(AgentMessage)
     private readonly messageRepo: Repository<AgentMessage>,
     private readonly pricingCache: ModelPricingCacheService,
+    private readonly dbSave: DatabaseSaveService,
   ) {
     this.cooldownCleanupTimer = setInterval(() => this.evictExpiredCooldowns(), 60_000);
     if (typeof this.cooldownCleanupTimer === 'object' && 'unref' in this.cooldownCleanupTimer) {
@@ -80,6 +83,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       fallback_index: fallbackIndex ?? null,
       auth_type: authType ?? null,
     });
+    await this.dbSave.save();
   }
 
   async recordFailedFallbacks(
@@ -128,6 +132,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
         auth_type: authType ?? null,
       });
     }
+    await this.dbSave.save();
   }
 
   async recordPrimaryFailure(
@@ -157,6 +162,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       fallback_index: null,
       auth_type: authType ?? null,
     });
+    await this.dbSave.save();
   }
 
   async recordFallbackSuccess(
@@ -204,6 +210,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
       fallback_from_model: fallbackFromModel ?? null,
       fallback_index: fallbackIndex ?? null,
     });
+    await this.dbSave.save();
   }
 
   async recordSuccessMessage(
@@ -296,6 +303,7 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
         });
       },
     );
+    await this.dbSave.save();
   }
 
   private async findExistingSuccessMessage(
@@ -392,15 +400,41 @@ export class ProxyMessageRecorder implements OnModuleDestroy {
     ctx: IngestionContext,
     fn: (messageRepo: Repository<AgentMessage>) => Promise<T>,
   ): Promise<T> {
-    return this.messageRepo.manager.transaction(async (manager) => {
-      await this.lockAgentMessageWrites(manager, ctx.agentId);
-      return fn(manager.getRepository(AgentMessage));
-    });
+    const runTransaction = () =>
+      this.messageRepo.manager.transaction(async (manager) => {
+        await this.lockAgentMessageWrites(manager, ctx.agentId);
+        return fn(manager.getRepository(AgentMessage));
+      });
+
+    if (this.messageRepo.manager.connection.options.type !== 'postgres') {
+      return this.withSqliteLock(ctx.agentId, runTransaction);
+    }
+    return runTransaction();
   }
 
   private async lockAgentMessageWrites(manager: EntityManager, agentId: string): Promise<void> {
     if (manager.connection.options.type !== 'postgres') return;
     await manager.query('SELECT id FROM agents WHERE id = $1 FOR UPDATE', [agentId]);
+  }
+
+  private async withSqliteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.sqliteLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.catch(() => undefined).then(() => current);
+    this.sqliteLocks.set(key, queued);
+    await previous.catch(() => undefined);
+
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.sqliteLocks.get(key) === queued) {
+        this.sqliteLocks.delete(key);
+      }
+    }
   }
 
   private getSuccessWriteLockKey(

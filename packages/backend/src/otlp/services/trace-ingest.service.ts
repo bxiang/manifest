@@ -7,6 +7,7 @@ import { LlmCall } from '../../entities/llm-call.entity';
 import { ToolExecution } from '../../entities/tool-execution.entity';
 import { ModelPricingCacheService } from '../../model-prices/model-pricing-cache.service';
 import { UserProvider } from '../../entities/user-provider.entity';
+import { DatabaseSaveService } from '../../database/database-save.service';
 import { OtlpExportTraceServiceRequest, OtlpSpan, OtlpResourceSpans } from '../interfaces';
 import { IngestionContext } from '../interfaces/ingestion-context.interface';
 import { In, Not, IsNull, MoreThanOrEqual } from 'typeorm';
@@ -45,6 +46,8 @@ interface DedupContext {
 
 @Injectable()
 export class TraceIngestService {
+  private readonly sqliteLocks = new Map<string, Promise<void>>();
+
   constructor(
     @InjectRepository(AgentMessage)
     private readonly turnRepo: Repository<AgentMessage>,
@@ -55,6 +58,7 @@ export class TraceIngestService {
     @InjectRepository(UserProvider)
     private readonly providerRepo: Repository<UserProvider>,
     private readonly pricingCache: ModelPricingCacheService,
+    private readonly dbSave: DatabaseSaveService,
   ) {}
 
   async ingest(
@@ -309,6 +313,7 @@ export class TraceIngestService {
     ctx: IngestionContext,
   ): Promise<void> {
     const subOnlyProviders = await this.getSubscriptionProviders(ctx.agentId);
+    const isSqljs = this.turnRepo.manager.connection.options.type !== 'postgres';
     await this.withTurnWriteTransaction(ctx, async ({ turnRepo, llmRepo, toolRepo }) => {
       const ghostSpanIds = this.filterGhostSpans(spans, resourceAttrs, spanMap);
       const fallbackModelOverrides = new Map<string, string>();
@@ -371,20 +376,28 @@ export class TraceIngestService {
         }
       }
 
-      const inserts: Promise<unknown>[] = [];
-      if (agentMessageRows.length > 0) inserts.push(turnRepo.insert(agentMessageRows));
-      if (llmCallRows.length > 0) inserts.push(llmRepo.insert(llmCallRows));
-      if (toolExecutionRows.length > 0) inserts.push(toolRepo.insert(toolExecutionRows));
-      await Promise.all(inserts);
+      if (isSqljs) {
+        if (agentMessageRows.length > 0) await turnRepo.insert(agentMessageRows);
+        if (llmCallRows.length > 0) await llmRepo.insert(llmCallRows);
+        if (toolExecutionRows.length > 0) await toolRepo.insert(toolExecutionRows);
+      } else {
+        const inserts: Promise<unknown>[] = [];
+        if (agentMessageRows.length > 0) inserts.push(turnRepo.insert(agentMessageRows));
+        if (llmCallRows.length > 0) inserts.push(llmRepo.insert(llmCallRows));
+        if (toolExecutionRows.length > 0) inserts.push(toolRepo.insert(toolExecutionRows));
+        await Promise.all(inserts);
+      }
 
       await this.rollUpMessageAggregates(
         turnRepo,
         messageAggregates,
         subOnlyProviders,
+        isSqljs,
         fallbackModelOverrides,
         fallbackDurations,
       );
     });
+    await this.dbSave.save();
   }
 
   private accumulateToMessage(
@@ -450,6 +463,7 @@ export class TraceIngestService {
       }
     >,
     subOnlyProviders: Set<string>,
+    sequential: boolean,
     fallbackModelOverrides?: Map<string, string>,
     fallbackDurations?: Map<string, number>,
   ): Promise<void> {
@@ -509,7 +523,11 @@ export class TraceIngestService {
         .setParameter('reason', agg.reason)
         .where('id = :id', { id: messageId });
       if (durationMs != null) qb.setParameter('durationMs', durationMs);
-      updates.push(qb.execute());
+      if (sequential) {
+        await qb.execute();
+      } else {
+        updates.push(qb.execute());
+      }
     }
     if (updates.length > 0) await Promise.all(updates);
   }
@@ -693,19 +711,45 @@ export class TraceIngestService {
       toolRepo: Repository<ToolExecution>;
     }) => Promise<T>,
   ): Promise<T> {
-    return this.turnRepo.manager.transaction(async (manager) => {
-      await this.lockAgentMessageWrites(manager, ctx.agentId);
-      return fn({
-        turnRepo: manager.getRepository(AgentMessage),
-        llmRepo: manager.getRepository(LlmCall),
-        toolRepo: manager.getRepository(ToolExecution),
+    const runTransaction = () =>
+      this.turnRepo.manager.transaction(async (manager) => {
+        await this.lockAgentMessageWrites(manager, ctx.agentId);
+        return fn({
+          turnRepo: manager.getRepository(AgentMessage),
+          llmRepo: manager.getRepository(LlmCall),
+          toolRepo: manager.getRepository(ToolExecution),
+        });
       });
-    });
+
+    if (this.turnRepo.manager.connection.options.type !== 'postgres') {
+      return this.withSqliteLock(ctx.agentId, runTransaction);
+    }
+    return runTransaction();
   }
 
   private async lockAgentMessageWrites(manager: EntityManager, agentId: string): Promise<void> {
     if (manager.connection.options.type !== 'postgres') return;
     await manager.query('SELECT id FROM agents WHERE id = $1 FOR UPDATE', [agentId]);
+  }
+
+  private async withSqliteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.sqliteLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.catch(() => undefined).then(() => current);
+    this.sqliteLocks.set(key, queued);
+    await previous.catch(() => undefined);
+
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.sqliteLocks.get(key) === queued) {
+        this.sqliteLocks.delete(key);
+      }
+    }
   }
 
   private computeCost(attrs: AttributeMap, subOnlyProviders?: Set<string>): number | null {

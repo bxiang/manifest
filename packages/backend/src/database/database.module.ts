@@ -21,6 +21,7 @@ import { TierAssignment } from '../entities/tier-assignment.entity';
 import { CustomProvider } from '../entities/custom-provider.entity';
 import { DatabaseSeederService } from './database-seeder.service';
 import { LocalBootstrapService } from './local-bootstrap.service';
+import { DatabaseSaveService } from './database-save.service';
 import { ModelPricesModule } from '../model-prices/model-prices.module';
 import { InitialSchema1771464895790 } from './migrations/1771464895790-InitialSchema';
 import { HashApiKeys1771500000000 } from './migrations/1771500000000-HashApiKeys';
@@ -132,7 +133,7 @@ function buildModeServices() {
           return {
             type: 'sqljs' as const,
             location: dbPath === ':memory:' ? undefined : dbPath,
-            autoSave: dbPath !== ':memory:',
+            autoSave: false,
             entities,
             synchronize: true,
             migrationsRun: false,
@@ -168,7 +169,7 @@ function buildModeServices() {
     ]),
     ModelPricesModule,
   ],
-  providers: buildModeServices(),
-  exports: buildModeServices(),
+  providers: [...buildModeServices(), DatabaseSaveService],
+  exports: [...buildModeServices(), DatabaseSaveService],
 })
 export class DatabaseModule {}

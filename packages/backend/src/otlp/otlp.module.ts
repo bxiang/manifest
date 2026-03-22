@@ -11,6 +11,7 @@ import { CostSnapshot } from '../entities/cost-snapshot.entity';
 import { AgentLog } from '../entities/agent-log.entity';
 import { UserProvider } from '../entities/user-provider.entity';
 import { ModelPricesModule } from '../model-prices/model-prices.module';
+import { DatabaseModule } from '../database/database.module';
 import { OtlpController } from './otlp.controller';
 import { OtlpDecoderService } from './services/otlp-decoder.service';
 import { TraceIngestService } from './services/trace-ingest.service';
@@ -34,6 +35,7 @@ import { OtlpAuthGuard } from './guards/otlp-auth.guard';
       UserProvider,
     ]),
     ModelPricesModule,
+    DatabaseModule,
   ],
   controllers: [OtlpController],
   providers: [
