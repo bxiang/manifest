@@ -4,11 +4,11 @@ describe('DatabaseSaveService', () => {
   let service: DatabaseSaveService;
   let mockSaveDatabase: jest.Mock;
 
-  describe('with sqljs datasource', () => {
+  describe('with sqljs datasource (file-backed)', () => {
     beforeEach(() => {
       mockSaveDatabase = jest.fn().mockResolvedValue(undefined);
       const mockDataSource = {
-        options: { type: 'sqljs' },
+        options: { type: 'sqljs', location: '/tmp/test.db' },
         manager: { saveDatabase: mockSaveDatabase },
       };
       service = new DatabaseSaveService(mockDataSource as never);
@@ -22,6 +22,22 @@ describe('DatabaseSaveService', () => {
     it('flushes on application shutdown', async () => {
       await service.onApplicationShutdown();
       expect(mockSaveDatabase).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('with sqljs datasource (in-memory)', () => {
+    beforeEach(() => {
+      mockSaveDatabase = jest.fn().mockResolvedValue(undefined);
+      const mockDataSource = {
+        options: { type: 'sqljs' },
+        manager: { saveDatabase: mockSaveDatabase },
+      };
+      service = new DatabaseSaveService(mockDataSource as never);
+    });
+
+    it('skips save when no location is set', async () => {
+      await service.save();
+      expect(mockSaveDatabase).not.toHaveBeenCalled();
     });
   });
 
